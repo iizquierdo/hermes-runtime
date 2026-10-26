@@ -548,6 +548,8 @@ CMD [ ]
 # kit-runtime/ ya está en /opt/hermes por el `COPY . .` de arriba; se copia de nuevo para no depender del .dockerignore oficial.
 COPY --chmod=a+rX,go-w kit-runtime/ /opt/hermes/kit-runtime/
 COPY --chmod=0755 kit-runtime/cont-init.d/05-agent-pack /etc/cont-init.d/05-agent-pack
+# Servicio s6 `kit-reporte`: el estado al núcleo cada 5 minutos (se suma al bundle `user` oficial; sin núcleo queda abajo).
+COPY --chmod=0755 kit-runtime/s6-rc.d/ /etc/s6-overlay/s6-rc.d/
 # Sin una clave pública no se podría aplicar ningún paquete: mejor que el build falle a publicar una imagen que no sirve.
 RUN set -eu; for clave in /opt/hermes/kit-runtime/keys/*.pub; do test -f "$clave"; done; \
     /opt/hermes/.venv/bin/python -c "import cryptography.hazmat.primitives.asymmetric.ed25519"; \

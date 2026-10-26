@@ -275,7 +275,7 @@ def test_el_paquete_de_ejemplo_se_arma_y_se_aplica(clave, home, tmp_path, monkey
 
     assert p.main(["apply", "--source", str(zip_), "--home", str(home)]) == 0
     assert (home / "skills/ejemplo/consulta-basica/SKILL.md").exists()
-    assert {d.name for d in (home / "plugins").iterdir()} == {"nucleo-acceso", "nucleo-identidad", "solo-lectura",
+    assert {d.name for d in (home / "plugins").iterdir()} == {"nucleo-acceso", "nucleo-identidad", "solo-lectura", "comandos-al-agente",
                                                               "hermes-session-reset-policy"}
 
 

@@ -67,6 +67,7 @@ jobs:
           python -m pytest -q -p no:cacheprovider kit-runtime/provision/tests
           (cd kit-runtime/plugins/nucleo-acceso && python -m pytest -q -p no:cacheprovider)
           (cd kit-runtime/plugins/solo-lectura && python -m pytest -q -p no:cacheprovider)
+          (cd kit-runtime/plugins/comandos-al-agente && python -m pytest -q -p no:cacheprovider)
 
       - name: Verificar que el tag no esté publicado
         env:

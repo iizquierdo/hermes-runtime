@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import hermes_config  # noqa: E402
+import nucleo  # noqa: E402
 import paquete  # noqa: E402
 from paquete import _archivos, _bytes  # noqa: E402
 
@@ -342,8 +344,9 @@ def _canal_principal(datos: dict) -> str:
     return str(home.get("chat_id") or "") if isinstance(home, dict) else ""
 
 
-def gating_pendiente(datos: dict, admins: tuple[str, ...]) -> list[str]:
+def gating_pendiente(datos: dict, admins: tuple[str, ...], comandos: tuple[str, ...] | None = None) -> list[str]:
     """Qué falta del control de comandos y del canal principal (vacío = todo en su lugar)."""
+    comandos = list(comandos) if comandos is not None else COMANDOS_USUARIO
     problemas: list[str] = []
     extra = _extra_telegram(datos)
     actuales = [str(a) for a in (extra.get("allow_admin_from") or [])]
@@ -351,14 +354,15 @@ def gating_pendiente(datos: dict, admins: tuple[str, ...]) -> list[str]:
         problemas.append("allow_admin_from no está definido: cualquier usuario puede correr los 134 comandos (/pause, /sethome, /restart…)")
     elif admins and sorted(actuales) != sorted(admins):
         problemas.append("allow_admin_from no coincide con --admins")
-    if sorted(str(c) for c in (extra.get("user_allowed_commands") or [])) != sorted(COMANDOS_USUARIO):
-        problemas.append(f"user_allowed_commands debería ser {COMANDOS_USUARIO}")
+    if sorted(str(c) for c in (extra.get("user_allowed_commands") or [])) != sorted(comandos):
+        problemas.append(f"user_allowed_commands debería ser {comandos}")
     if admins and _canal_principal(datos) != admins[0]:
         problemas.append("falta el canal principal de Telegram (sin él, cada usuario recibe el aviso de /sethome)")
     return problemas
 
 
-def pedido_de_config(home: Path, origen: Origen, perfil: str, admins: tuple[str, ...]) -> dict:
+def pedido_de_config(home: Path, origen: Origen, perfil: str, admins: tuple[str, ...],
+                     comandos: tuple[str, ...] | None = None) -> dict:
     """Lo que `hermes_config.py` escribe en config.yaml para este perfil."""
     if perfil == "admin":
         return {"forzado": CONFIG_POR_PERFIL["admin"]}
@@ -367,7 +371,8 @@ def pedido_de_config(home: Path, origen: Origen, perfil: str, admins: tuple[str,
         "forzado": CONFIG_POR_PERFIL["bot"],
         "plugins": sorted(plugins_del_bot(origen)),
         "retirar": sorted(origen.retirar),
-        "gating": {"admins": list(admins), "comandos": COMANDOS_USUARIO} if admins else None,
+        "gating": {"admins": list(admins), "comandos": list(comandos) if comandos is not None else COMANDOS_USUARIO}
+        if admins else None,
     }
 
 
@@ -389,7 +394,7 @@ def escribir_config(home: Path, pedido: dict) -> bool:
     gating = pedido.get("gating")
     if gating:
         hecho.append(f"control de comandos: {len(gating['admins'])} administrador(es), usuarios con "
-                     f"{', '.join('/' + c for c in COMANDOS_USUARIO)}; canal principal fijado")
+                     f"{', '.join('/' + c for c in gating['comandos']) or 'ningún comando'}; canal principal fijado")
     print("  config.yaml escrito: " + "; ".join(hecho))
     return True
 
@@ -451,7 +456,8 @@ def revisar_admision(home: Path) -> tuple[list[str], list[str]]:
     return fallas, avisos
 
 
-def revisar_entorno(home: Path, origen: Origen, perfil: str = "bot", admins: tuple[str, ...] = ()) -> tuple[list[str], list[str]]:
+def revisar_entorno(home: Path, origen: Origen, perfil: str = "bot", admins: tuple[str, ...] = (),
+                    comandos: tuple[str, ...] | None = None) -> tuple[list[str], list[str]]:
     """(fallas, avisos) de la configuración y de lo que el script no gestiona pero conviene vigilar."""
     fallas: list[str] = []
     avisos: list[str] = []
@@ -475,7 +481,7 @@ def revisar_entorno(home: Path, origen: Origen, perfil: str = "bot", admins: tup
                     fallas.append(f"config.yaml: {clave} no coincide con la configuración del paquete")
                 for nombre in plugins_sin_habilitar(datos, plugins_del_bot(origen)):
                     fallas.append(f"config.yaml: el plugin {nombre} no está en plugins.enabled")
-                for problema in gating_pendiente(datos, admins):
+                for problema in gating_pendiente(datos, admins, comandos):
                     (avisos if (not admins and problema.startswith("falta el canal")) else fallas).append(f"config.yaml: {problema}")
     else:
         avisos.append("config.yaml: no existe en este HERMES_HOME (la imagen lo crea al arrancar; sin él no se aplica la configuración)")
@@ -484,9 +490,15 @@ def revisar_entorno(home: Path, origen: Origen, perfil: str = "bot", admins: tup
         f, a = revisar_admision(home)
         fallas += f
         avisos += a
-        entorno = entorno_del_gateway() or {}
-        if entorno.get(PANEL_WEB, "").strip().lower() in ("1", "true", "yes"):
+        entorno = entorno_del_gateway()
+        if (entorno or {}).get(PANEL_WEB, "").strip().lower() in ("1", "true", "yes"):
             fallas.append(f"{PANEL_WEB} está encendida: el panel web de Hermes no tiene que correr (quitar la variable y reiniciar)")
+        faltan = variables_sin_definir(config_deseada(home, origen), entorno, home)
+        if faltan:
+            mensaje = (f"la configuración usa ${{{faltan[0]}}}" + (f" y {len(faltan) - 1} variable(s) más" if len(faltan) > 1 else "")
+                       + f" sin definir ({', '.join(faltan)}): Hermes deja el texto literal y esa parte no funciona")
+            (fallas if entorno is not None else avisos).append(
+                mensaje if entorno is not None else mensaje + " (no pude leer el entorno del gateway: miré el de este proceso)")
 
     memorias = home / "memories"
     if bot and memorias.is_dir() and any(p.is_file() and p.stat().st_size for p in memorias.rglob("*")):
@@ -495,6 +507,43 @@ def revisar_entorno(home: Path, origen: Origen, perfil: str = "bot", admins: tup
             "revisarla antes de dejar el bot abierto"
         )
     return fallas, avisos
+
+
+_REFERENCIA = re.compile(r"\$\{([^}]+)\}")
+
+
+def variables_sin_definir(config: dict, entorno: dict[str, str] | None, home: Path) -> list[str]:
+    """Las variables `${VAR}` / `${env:VAR}` de la configuración que no están ni en el entorno del gateway ni en el .env del volumen.
+
+    Hermes las expande al leer config.yaml (`load_config`, y otra vez al armar `mcp_servers`); si una no existe deja el texto
+    `${VAR}` tal cual, y por ejemplo la URL de un servidor MCP queda rota. Si no se pudo leer el entorno del gateway, se usa el de
+    este proceso.
+    """
+    nombres: set[str] = set()
+
+    def juntar(valor) -> None:
+        if isinstance(valor, str):
+            for ref in _REFERENCIA.findall(valor):
+                ref = ref.strip()
+                ref = ref[len("env:"):].strip() if ref.startswith("env:") else ref
+                if ref and not re.match(r"^[a-z][a-z0-9_-]*:", ref):     # otras fuentes (vault:…) no son del entorno
+                    nombres.add(ref)
+        elif isinstance(valor, dict):
+            for v in valor.values():
+                juntar(v)
+        elif isinstance(valor, list):
+            for v in valor:
+                juntar(v)
+
+    juntar(config)
+    disponibles = set(entorno if entorno is not None else os.environ)
+    archivo = home / ".env"
+    if archivo.is_file():
+        for linea in archivo.read_text(encoding="utf-8", errors="replace").splitlines():
+            nombre, igual, valor = linea.partition("=")
+            if igual and valor.strip():
+                disponibles.add(nombre.strip().removeprefix("export ").strip())
+    return sorted(n for n in nombres if n not in disponibles)
 
 
 def respaldar(home: Path, destinos: list[Path]) -> Path | None:
@@ -514,8 +563,18 @@ def respaldar(home: Path, destinos: list[Path]) -> Path | None:
 
 
 def comando_check(
-    origen: Origen, home: Path, perfil: str = "bot", admins: tuple[str, ...] = (), mostrar_paquete: bool = True
+    origen: Origen, home: Path, perfil: str = "bot", admins: tuple[str, ...] = (), mostrar_paquete: bool = True,
+    comandos: tuple[str, ...] | None = None, chequeos: list[tuple[str, str]] | None = None,
 ) -> int:
+    """Compara el volumen con el paquete sin tocar nada. Imprime cada resultado y, si se pasa `chequeos`, lo agrega ahí como
+    (nivel, texto) con los niveles del plano de control: ok, fail, warn."""
+    chequeos = chequeos if chequeos is not None else []
+    etiqueta = {"ok": "OK    ", "fail": "FALLA ", "warn": "AVISO "}
+
+    def anotar(nivel: str, texto: str) -> None:
+        chequeos.append((nivel, " ".join(texto.split())))
+        print(f"  {etiqueta[nivel]} {texto}")
+
     items = plan(origen, home, perfil)
     problemas = 0
     registro = leer_registro(home)
@@ -524,25 +583,25 @@ def comando_check(
     for item in items:
         e = estado(item)
         problemas += e != OK
-        print(f"  {'OK    ' if e == OK else 'FALLA '} {item.tipo:6} {item.nombre:28} {e}")
+        anotar("ok" if e == OK else "fail", f"{item.tipo:6} {item.nombre:28} {e}")
 
     quitar, obsoletos, ajenos = sobrantes(items, home, origen, perfil)
     motivo = "no va en el perfil admin" if perfil == "admin" else None
     for ruta in quitar:
         problemas += 1
-        print(f"  FALLA  {'textos' if ruta.name == DESTINO_TEXTOS else 'skill':6} {ruta.name:28} sobrante ({motivo or 'no está en el paquete'})")
+        anotar("fail", f"{'textos' if ruta.name == DESTINO_TEXTOS else 'skill':6} {ruta.name:28} sobrante ({motivo or 'no está en el paquete'})")
     for ruta in obsoletos:
         problemas += 1
-        print(f"  FALLA  plugin {ruta.name:28} {motivo or 'obsoleto'}, hay que quitarlo")
+        anotar("fail", f"plugin {ruta.name:28} {motivo or 'obsoleto'}, hay que quitarlo")
 
-    fallas, avisos = revisar_entorno(home, origen, perfil, admins)
+    fallas, avisos = revisar_entorno(home, origen, perfil, admins, comandos)
     for mensaje in fallas:
         problemas += 1
-        print(f"  FALLA  {mensaje}")
+        anotar("fail", mensaje)
     for nombre in ajenos:
         avisos.append(f"plugin {nombre}: no está en el paquete ni en el runtime y no lo gestiono (si es de seguridad, versionarlo)")
     for mensaje in avisos:
-        print(f"  AVISO  {mensaje}")
+        anotar("warn", mensaje)
 
     print(f"\n{'Todo coincide con el paquete.' if not problemas else f'{problemas} cosa(s) para corregir.'}")
     return 1 if problemas else 0
@@ -559,7 +618,8 @@ def crear_perfil_admin(base: Path) -> None:
         raise SystemExit(f"No se pudo crear el perfil {PERFIL_ADMIN}; crealo a mano y volvé a correr apply")
 
 
-def config_a_escribir(home: Path, origen: Origen, perfil: str, admins: tuple[str, ...]) -> bool:
+def config_a_escribir(home: Path, origen: Origen, perfil: str, admins: tuple[str, ...],
+                      comandos: tuple[str, ...] | None = None) -> bool:
     """¿Hay algo de config.yaml para escribir? Solo si el archivo existe (lo crea la imagen al arrancar)."""
     if not (home / "config.yaml").is_file():
         return False
@@ -571,16 +631,17 @@ def config_a_escribir(home: Path, origen: Origen, perfil: str, admins: tuple[str
     return bool(
         config_del_paquete_pendiente(home, origen)
         or plugins_sin_habilitar(datos, plugins_del_bot(origen))
-        or (admins and datos is not None and gating_pendiente(datos, admins))
+        or (admins and datos is not None and gating_pendiente(datos, admins, comandos))
     )
 
 
-def comando_apply(origen: Origen, home: Path, recargar: bool, perfil: str = "bot", admins: tuple[str, ...] = ()) -> int:
+def comando_apply(origen: Origen, home: Path, recargar: bool, perfil: str = "bot", admins: tuple[str, ...] = (),
+                  comandos: tuple[str, ...] | None = None) -> int:
     items = plan(origen, home, perfil)
     pendientes = [i for i in items if estado(i) != OK]
     quitar_skills, obsoletos, _ = sobrantes(items, home, origen, perfil)
     quitar = quitar_skills + obsoletos
-    config = config_a_escribir(home, origen, perfil, admins)
+    config = config_a_escribir(home, origen, perfil, admins, comandos)
 
     if not pendientes and not quitar and not config:
         print("Nada que cambiar: el volumen ya coincide con el paquete.")
@@ -589,7 +650,7 @@ def comando_apply(origen: Origen, home: Path, recargar: bool, perfil: str = "bot
         if respaldo:
             print(f"  Respaldo en {respaldo}")
         if config:
-            escribir_config(home, pedido_de_config(home, origen, perfil, admins))
+            escribir_config(home, pedido_de_config(home, origen, perfil, admins, comandos))
         for item in pendientes:
             copiar(item.origen, item.destino)
             print(f"  copiado {item.tipo:6} {item.nombre}")
@@ -598,7 +659,7 @@ def comando_apply(origen: Origen, home: Path, recargar: bool, perfil: str = "bot
             print(f"  quitado {ruta.parent.name}/{ruta.name}")
 
     print("\nVerificación posterior:")
-    codigo = comando_check(origen, home, perfil, admins, mostrar_paquete=False)
+    codigo = comando_check(origen, home, perfil, admins, mostrar_paquete=False, comandos=comandos)
     if perfil == "admin":
         print(f"\nPerfil de administración listo. Entrá a la TUI con: hermes -p {PERFIL_ADMIN}")
     elif recargar and (pendientes or quitar):
@@ -642,6 +703,131 @@ def leer_registro(home: Path) -> dict | None:
     return datos if isinstance(datos, dict) and datos.get("version") else None
 
 
+# Copia del último paquete que se aplicó bien: con ella `report` vuelve a correr `check`, y `pack-del-nucleo` pide al núcleo solo si
+# hay uno distinto (If-None-Match).
+COPIA_PAQUETE = ".agent-pack.zip"
+
+
+def guardar_copia(home: Path, zip_: Path) -> None:
+    destino = home / COPIA_PAQUETE
+    if zip_.resolve() != destino.resolve():
+        shutil.copyfile(zip_, destino)
+
+
+def resolver_control(explicitos: str | None) -> tuple[tuple[str, ...], tuple[str, ...] | None, str]:
+    """(administradores de Telegram, comandos permitidos o None = los por defecto, de dónde salieron).
+
+    Orden: `--admins` si se pasó; si no, el núcleo (`GET /runtime/config`, si están KIT_CORE_URL y KIT_CORE_TOKEN); si el núcleo
+    no responde bien o no tiene ningún administrador de Telegram, KIT_ADMIN_TELEGRAM_IDS (o IGA_ADMIN_TELEGRAM_IDS). Sin
+    ninguno, no se toca el control de comandos (y `check` lo marca como falla).
+    """
+    def lista(texto: str) -> tuple[str, ...]:
+        return tuple(a.strip() for a in texto.split(",") if a.strip())
+
+    if explicitos is not None:
+        return lista(explicitos), None, "--admins"
+    variable = os.environ.get("KIT_ADMIN_TELEGRAM_IDS") or os.environ.get("IGA_ADMIN_TELEGRAM_IDS", "")
+    del_nucleo = nucleo.Nucleo.del_entorno()
+    if del_nucleo is not None:
+        config, motivo = nucleo.pedir_config(del_nucleo)
+        if config is None:
+            print(f"[plano-de-control] el núcleo {motivo} en /runtime/config: se usan los administradores de KIT_ADMIN_TELEGRAM_IDS")
+        else:
+            ids = config.admins_de("telegram")
+            malos = [i for i in ids if not i.isdigit()]
+            ids = tuple(i for i in ids if i.isdigit())
+            if malos:
+                print(f"[plano-de-control] se ignoran {len(malos)} administrador(es) de Telegram con un id que no es numérico")
+            if ids:
+                return ids, config.comandos, "núcleo"
+            print("[plano-de-control] el núcleo no tiene administradores de Telegram activos: se usan los de KIT_ADMIN_TELEGRAM_IDS")
+    return lista(variable), None, "KIT_ADMIN_TELEGRAM_IDS"
+
+
+def ultima_actividad(home: Path) -> str | None:
+    """Hora (UTC, ISO 8601) del último mensaje de una persona en un canal de mensajería, de state.db; None si no se puede saber."""
+    import sqlite3
+
+    ruta = home / "state.db"
+    if not ruta.is_file():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{ruta}?mode=ro", uri=True, timeout=1.0)
+        try:
+            fila = con.execute(
+                "SELECT MAX(m.timestamp) FROM messages m JOIN sessions s ON s.id = m.session_id "
+                "WHERE m.role = 'user' AND lower(s.source) NOT IN ('cli', 'tui', 'desktop')"
+            ).fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+    if not fila or fila[0] is None:
+        return None
+    return datetime.fromtimestamp(float(fila[0]), timezone.utc).isoformat(timespec="seconds")
+
+
+def comando_report(home: Path, aplicacion: str = "") -> int:
+    """Corre `check` contra el último paquete aplicado y manda el resultado a POST /runtime/status. Nunca falla: devuelve 0."""
+    del_nucleo = nucleo.Nucleo.del_entorno()
+    if del_nucleo is None:
+        print("[plano-de-control] sin KIT_CORE_URL y KIT_CORE_TOKEN: no se reporta el estado")
+        return 0
+    chequeos: list[tuple[str, str]] = []
+    if aplicacion == "fallo":
+        chequeos.append(("fail", "el paquete no se aplicó en este arranque (ver el log [agent-pack]): sigue el anterior"))
+    registro = leer_registro(home)
+    copia = home / COPIA_PAQUETE
+    version = None
+    if not copia.is_file():
+        chequeos.append(("fail", "no hay ningún paquete aplicado"))
+    else:
+        try:
+            origen, _, tmp = abrir_paquete(str(copia))
+        except SystemExit as e:
+            chequeos.append(("fail", f"el último paquete aplicado ya no pasa la verificación: {e}"))
+        else:
+            try:
+                version = origen.manifiesto["version"]
+                admins, comandos, _ = resolver_control(None)
+                comando_check(origen, home, "bot", admins, mostrar_paquete=False, comandos=comandos, chequeos=chequeos)
+            finally:
+                tmp.cleanup()
+    if version is None and registro:
+        version = registro.get("version")
+    reporte = nucleo.armar_reporte(version_del_runtime(), version, chequeos, ultima_actividad(home))
+    ok, motivo = nucleo.reportar(del_nucleo, reporte)
+    print(f"[plano-de-control] estado reportado ({len(reporte['checks'])} chequeos)" if ok
+          else f"[plano-de-control] el núcleo {motivo} en /runtime/status: se reintenta en el próximo período")
+    return 0
+
+
+# Códigos de salida de `pack-del-nucleo` (los lee apply-pack.sh).
+SALIDA_NUEVO, SALIDA_SIN_CAMBIOS, SALIDA_SIN_PAQUETE, SALIDA_ERROR, SALIDA_SIN_NUCLEO = 0, 10, 11, 12, 13
+
+
+def comando_pack_del_nucleo(home: Path, salida: Path) -> int:
+    """Baja el paquete activo del núcleo (GET /runtime/pack) a `salida`. La firma la verifica después `apply`, como siempre."""
+    del_nucleo = nucleo.Nucleo.del_entorno()
+    if del_nucleo is None:
+        print("[agent-pack] KIT_PACK_FROM_CORE=1 pero faltan KIT_CORE_URL o KIT_CORE_TOKEN")
+        return SALIDA_SIN_NUCLEO
+    copia = home / COPIA_PAQUETE
+    actual = paquete.huella_archivo(copia) if copia.is_file() else ""
+    descarga = nucleo.bajar_paquete(del_nucleo, salida, actual)
+    if descarga.resultado == nucleo.NUEVO:
+        print(f"[agent-pack] el núcleo entregó el paquete {descarga.version} (sha256 {descarga.sha256})")
+        return SALIDA_NUEVO
+    if descarga.resultado == nucleo.SIN_CAMBIOS:
+        print("[agent-pack] el paquete del núcleo es el mismo que ya está aplicado")
+        return SALIDA_SIN_CAMBIOS
+    if descarga.resultado == nucleo.SIN_PAQUETE:
+        print("[agent-pack] el núcleo no tiene un paquete activo")
+        return SALIDA_SIN_PAQUETE
+    print(f"[agent-pack] no se pudo bajar el paquete del núcleo: {descarga.motivo}")
+    return SALIDA_ERROR
+
+
 def version_del_runtime() -> str:
     """`<versión de Hermes>-<revisión del overlay>`, de kit-runtime/VERSION. Sin ese archivo ningún paquete es compatible."""
     try:
@@ -678,9 +864,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         p.add_argument(
             "--admins",
-            default=os.environ.get("KIT_ADMIN_TELEGRAM_IDS") or os.environ.get("IGA_ADMIN_TELEGRAM_IDS", ""),
-            help="IDs de Telegram de los administradores, separados por coma (o $KIT_ADMIN_TELEGRAM_IDS, y si no está "
-                 "$IGA_ADMIN_TELEGRAM_IDS); el primero es el canal principal",
+            default=None,
+            help="IDs de Telegram de los administradores, separados por coma; el primero es el canal principal. Sin este "
+                 "argumento salen del núcleo (KIT_CORE_URL/KIT_CORE_TOKEN) y, si no responde, de $KIT_ADMIN_TELEGRAM_IDS "
+                 "(o $IGA_ADMIN_TELEGRAM_IDS)",
         )
         if nombre == "apply":
             p.add_argument("--reload", action="store_true", help="recargar los plugins de Hermes al terminar")
@@ -690,6 +877,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--version", required=True, help="versión del paquete, X.Y.Z")
     p.add_argument("--clave-privada", type=Path, default=os.environ.get("AGENT_PACK_SIGNING_KEY") or None,
                    help="clave privada ed25519 en PEM (o $AGENT_PACK_SIGNING_KEY); nunca dentro de un repo")
+    p = sub.add_parser("report", help="manda al núcleo el estado (versiones y chequeos de check) del último paquete aplicado")
+    p.add_argument("--home", type=Path, default=None)
+    p.add_argument("--aplicacion", choices=("ok", "fallo", "sin-paquete", ""), default="",
+                   help="cómo terminó la aplicación del paquete en este arranque (lo pasa apply-pack.sh)")
+    p = sub.add_parser("pack-del-nucleo", help="baja el paquete activo del núcleo (GET /runtime/pack)")
+    p.add_argument("--home", type=Path, default=None)
+    p.add_argument("--out", required=True, type=Path)
     p = sub.add_parser("keygen", help="crea el par de claves para firmar paquetes")
     p.add_argument("--privada", required=True, type=Path)
     p.add_argument("--publica", required=True, type=Path)
@@ -710,6 +904,12 @@ def main(argv: list[str] | None = None) -> int:
               f"({len(manifiesto['archivos'])} archivos)\nsha256: {paquete.huella_archivo(args.out)}")
         return 0
 
+    if args.comando in ("report", "pack-del-nucleo"):
+        home = args.home or Path(os.environ.get("HERMES_HOME", "/data/.hermes"))
+        if args.comando == "report":
+            return comando_report(home, args.aplicacion)
+        return comando_pack_del_nucleo(home, args.out)
+
     origen, clave, tmp = abrir_paquete(args.source, args.sha256)
     try:
         home = args.home or Path(os.environ.get("HERMES_HOME", "/data/.hermes"))
@@ -725,15 +925,18 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
         print(f"Paquete: {origen.nombre} {origen.manifiesto['version']} (firmado con {clave})\n"
               f"Runtime: {version_del_runtime()}\nPerfil: {args.perfil}\nHermes: {home}\n")
-        admins = tuple(a.strip() for a in args.admins.split(",") if a.strip())
+        admins, comandos, fuente = resolver_control(args.admins) if args.perfil == "bot" else ((), None, "")
         malos = [a for a in admins if not a.isdigit()]
         if malos:
-            raise SystemExit(f"--admins espera IDs numéricos de Telegram, no: {', '.join(malos)}")
+            raise SystemExit(f"Los administradores tienen que ser IDs numéricos de Telegram ({fuente}), no: {', '.join(malos)}")
+        if admins:
+            print(f"Administradores: {len(admins)} (de {fuente})\n")
         if args.comando == "check":
-            return comando_check(origen, home, args.perfil, admins)
-        codigo = comando_apply(origen, home, args.reload, args.perfil, admins)
+            return comando_check(origen, home, args.perfil, admins, comandos=comandos)
+        codigo = comando_apply(origen, home, args.reload, args.perfil, admins, comandos)
         if codigo == 0 and args.perfil == "bot":
             registrar_paquete(home, origen, clave)
+            guardar_copia(home, Path(args.source))
             print(f"Paquete {origen.manifiesto['version']} registrado en {home / REGISTRO}")
         return codigo
     finally:

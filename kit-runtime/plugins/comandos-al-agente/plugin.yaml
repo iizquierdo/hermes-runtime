@@ -1,0 +1,5 @@
+name: comandos-al-agente
+version: 0.1.0
+description: Reescribe como texto los comandos con barra que declara el paquete (por ejemplo /newUser), para que lleguen al agente en vez del aviso de comando desconocido de Hermes. Nunca toca los comandos de Hermes.
+provides_hooks:
+  - pre_gateway_dispatch

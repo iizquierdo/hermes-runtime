@@ -1,0 +1,8 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Sin núcleo configurado, ./run sale enseguida: 125 es la marca de s6 de "falla permanente, no reiniciar" (ver el `finish` oficial
+# del servicio dashboard). Con núcleo, el bucle no debería terminar; si termina, s6 lo reinicia.
+if [ -z "${KIT_CORE_URL:-${IGA_CORE_URL:-}}" ] || [ -z "${KIT_CORE_TOKEN:-${IGA_CORE_TOKEN:-}}" ]; then
+  exit 125
+fi
+exit 0

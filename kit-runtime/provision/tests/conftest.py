@@ -33,6 +33,9 @@ CONFIG_DEL_PAQUETE = {
     "session_reset": {"mode": "idle", "idle_minutes": 120},
 }
 
+# Las variables que usa CONFIG_DEL_PAQUETE: un gateway bien configurado las tiene en su entorno.
+VARS_DEL_PAQUETE = {"CORE_MCP_URL": "http://nucleo:8000/mcp", "MCP_KIT_TOKEN": "token-de-prueba"}
+
 # Los plugins que el bot tiene que tener habilitados con el paquete de los tests: el del runtime falso y el propio del cliente.
 PLUGINS_HABILITADOS = ["cli-extra", "nucleo-acceso"]
 

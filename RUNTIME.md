@@ -13,7 +13,8 @@ Todo el árbol de Hermes está sin tocar, salvo un bloque delimitado al final de
 | `kit-runtime/VERSION` | versión del runtime, `<versión de Hermes>-<revisión del overlay>`; el tag de git es `v` + esto |
 | `kit-runtime/cont-init.d/05-agent-pack` | gancho s6: aplica el paquete como el usuario `hermes` antes del gateway. **Nunca corta el arranque** |
 | `kit-runtime/provision/` | `provision.py` (check/apply/bundle/keygen), `paquete.py` (formato v2 y firma), `hermes_config.py`, `apply-pack.sh`, tests |
-| `kit-runtime/plugins/` | plugins del runtime, que se instalan y habilitan siempre: `nucleo-acceso`, `nucleo-identidad`, `solo-lectura`, `hermes-session-reset-policy` |
+| `kit-runtime/plugins/` | plugins del runtime, que se instalan y habilitan siempre: `nucleo-acceso`, `nucleo-identidad`, `solo-lectura`, `comandos-al-agente`, `hermes-session-reset-policy` |
+| `kit-runtime/s6-rc.d/kit-reporte/` | servicio s6 que reporta el estado al núcleo cada 5 minutos |
 | `kit-runtime/keys/` | claves públicas ed25519 con las que se verifican los paquetes (ver su README) |
 | `kit-runtime/ejemplo/` | paquete de ejemplo, neutro: muestra la declaración y cómo se arma |
 | `pack/README.md` | dónde va el paquete del cliente (no en este repo) |
@@ -22,12 +23,15 @@ Todo el árbol de Hermes está sin tocar, salvo un bloque delimitado al final de
 ## Qué hace la imagen al arrancar
 
 1. El setup oficial de Hermes (cont-init 01, 015, 02): usuario, permisos del volumen `/opt/data`, `config.yaml` inicial.
-2. `05-agent-pack` corre `kit-runtime/provision/apply-pack.sh` como `hermes`. El paquete sale de `AGENT_PACK_URL` (+ `AGENT_PACK_SHA256`, obligatoria
-   con la URL) o de `AGENT_PACK_FILE` (por defecto `/opt/hermes/pack/agent-pack.zip`, que agrega la imagen del cliente).
+2. `05-agent-pack` corre `kit-runtime/provision/apply-pack.sh` como `hermes`. El paquete sale, por orden, de `AGENT_PACK_URL` (+ `AGENT_PACK_SHA256`,
+   obligatoria con la URL), del núcleo si `KIT_PACK_FROM_CORE=1` (ver *Plano de control*) o de `AGENT_PACK_FILE` (por defecto
+   `/opt/hermes/pack/agent-pack.zip`, que agrega la imagen del cliente).
 3. `provision.py apply` verifica **antes de escribir nada**: huella del zip si se pidió, firma ed25519 del manifiesto con `kit-runtime/keys/*.pub`, formato
    2, que el paquete declare compatible esta versión (`kit-runtime/VERSION`), huella de cada archivo (ni de más ni de menos) y que su configuración no
    traiga nada prohibido. Recién entonces copia, con respaldo en `$HERMES_HOME/backups/provision-<fecha>/` de lo que pisa o quita.
-4. El gateway (`hermes gateway run`) arranca con lo aplicado. Si algo falló, con lo que había, y el motivo queda en el log con el prefijo `[agent-pack]`.
+4. Con núcleo configurado, reporta el estado (`POST /runtime/status`), aunque el paquete haya fallado.
+5. El gateway (`hermes gateway run`) arranca con lo aplicado. Si algo falló, con lo que había, y el motivo queda en el log con el prefijo `[agent-pack]`.
+   El servicio `kit-reporte` vuelve a reportar cada 5 minutos.
 
 Qué deja `apply` en el volumen (perfil del bot):
 
@@ -108,6 +112,37 @@ COPY pack/agent-pack.zip /opt/hermes/pack/agent-pack.zip
 
 O la imagen genérica sola, con el paquete por `AGENT_PACK_URL` + `AGENT_PACK_SHA256`.
 
+## Plano de control (el núcleo)
+
+Contrato: `mcp-kit/docs/runtime-control-plane.md`. Se activa con `KIT_CORE_URL` y `KIT_CORE_TOKEN` (el token de runtime del despliegue); sin
+ellas el runtime funciona igual que antes, sin hablar con el núcleo. Todo lo que el núcleo responda distinto de lo esperado, un error de red o un
+timeout (5 s) es "no sé": nunca "todo permitido", y **nunca corta el arranque**. Cliente: `kit-runtime/provision/nucleo.py`.
+
+| Qué | Cuándo | Qué hace el runtime |
+|---|---|---|
+| `GET /runtime/config` | en cada `apply` y `check` | toma los administradores `telegram:<id>` y los `allowed_commands` para el control de comandos de Telegram (`allow_admin_from`, `user_allowed_commands`). Si el núcleo no responde, o no tiene ningún administrador de Telegram activo, usa `KIT_ADMIN_TELEGRAM_IDS` con los comandos por defecto y lo deja en el log (`[plano-de-control]`). `--admins` en la línea de comandos gana sobre los dos |
+| `POST /runtime/status` | al arrancar (después de aplicar el paquete, o de fallar) y cada `KIT_REPORTE_SEGUNDOS` (300; mínimo 60) desde el servicio s6 `kit-reporte` | manda `runtime: hermes`, `id` (`KIT_RUNTIME_ID`, por defecto `runtime`), la versión del runtime (`kit-runtime/VERSION`), la del paquete y los resultados de `check` (OK/FALLA/AVISO → ok/fail/warn) contra el último paquete aplicado, más `last_activity`: la hora del último mensaje de una persona por un canal de mensajería (`state.db`). Un reporte rechazado se reintenta en el próximo período |
+| `GET /runtime/pack` | al arrancar, solo con `KIT_PACK_FROM_CORE=1` | 200: zip con `X-Pack-Version`, `X-Pack-Sha256` y `ETag: "<sha256>"`; se guarda solo si la huella coincide con los dos. 304 (manda `If-None-Match` con la huella del último aplicado): se vuelve a aplicar ese. 204: se sigue con el de la imagen. Sin respuesta: el último aplicado si hay, si no el de la imagen. **La firma se verifica siempre**, como a cualquier otro paquete |
+
+El último paquete aplicado queda en `$HERMES_HOME/.agent-pack.zip`: es contra el que `report` corre `check` y lo que se compara con el núcleo.
+
+Los administradores se aplican al arrancar: aprobar o suspender a alguien en el núcleo llega al bot en el próximo reinicio (el núcleo los sirve al
+momento, pero Hermes lee `allow_admin_from` de `config.yaml`).
+
+## Lo verificado en el código de Hermes 0.22.2
+
+- **Un comando con barra que Hermes no conoce no llega al agente** (`gateway/run_inbound.py`): si no es de Hermes, de un plugin, un alias de
+  `quick_commands` ni el nombre de una skill, `_hm_unknown_slash_reply` contesta "comando desconocido" y no lo pasa al modelo. No depende de
+  `allow_admin_from` (el control de comandos solo mira los que Hermes conoce). Por eso existe el plugin **`comandos-al-agente`**: los comandos que
+  el paquete declara en `textos/comandos-al-agente.json` (`{"comandos": "newUser"}`) los reescribe en `pre_gateway_dispatch` como texto común
+  (`Comando del usuario: /newUser …`), que sigue el camino normal: `nucleo-acceso` lo filtra y el modelo lo ve con la barra. Nunca reescribe un
+  comando de Hermes. Alternativa sin plugin: que el comando se llame como la skill (`/<nombre de la skill>` la carga).
+- **`${VAR}` dentro de `mcp_servers` sí se expande**: `load_config()` expande `${VAR}` y `${env:VAR}` en todos los valores (`hermes_cli/config.py`,
+  `_expand_env_vars`), y `tools/mcp_tool_config.py` (`_load_mcp_config`) lo vuelve a hacer al armar los servidores, incluso dentro de un texto
+  (`Bearer ${MCP_KIT_TOKEN}`). Lo que hay que cuidar: **una variable que no existe queda como el texto literal** `${VAR}` (Hermes solo lo avisa en su
+  log), y la URL o el header quedan rotos. Por eso `check` falla si la configuración usa una variable que no está en el entorno del gateway ni en el
+  `.env` del volumen.
+
 ## Variables de entorno
 
 | Variable | Quién la usa | Qué es |
@@ -121,7 +156,11 @@ O la imagen genérica sola, con el paquete por `AGENT_PACK_URL` + `AGENT_PACK_SH
 | `MCPKIT_IDENTIDAD_SECRETO` | `nucleo-identidad` | el mismo valor que tiene el núcleo (obligatoria; el nombre es el del núcleo, no cambia) |
 | `KIT_MCP_NOMBRES` | `nucleo-identidad` | fragmentos del nombre de tool del servidor del núcleo, p. ej. `mcp__nucleo__` (obligatoria: sin ella no se firma nada) |
 | `KIT_IDENTIDAD_HEADER`, `KIT_IDENTIDAD_CON_CANAL` | `nucleo-identidad` | `x-channel-id` y `1` por defecto |
-| `KIT_TEXTOS_DIR` | los tres plugins | carpeta de textos (por defecto `$HERMES_HOME/textos`) |
+| `KIT_TEXTOS_DIR` | los plugins del runtime | carpeta de textos (por defecto `$HERMES_HOME/textos`) |
+| `KIT_RUNTIME_ID` | reporte al núcleo | id de esta instancia en el panel (por defecto `runtime`; dos runtimes contra el mismo núcleo necesitan ids distintos) |
+| `KIT_REPORTE_SEGUNDOS` | servicio `kit-reporte` | período del reporte (300 por defecto, mínimo 60) |
+| `KIT_PACK_FROM_CORE` | `apply-pack.sh` | `1` para pedir el paquete al núcleo (`GET /runtime/pack`) |
+| `KIT_COMANDOS_AL_AGENTE` | `comandos-al-agente` | comandos con barra que van al agente, además de los del paquete |
 | `HERMES_SOLO_LECTURA*` | `solo-lectura` | sin cambios (ver su docstring) |
 
 **Compatibilidad:** cada `KIT_<X>` de la tabla (salvo `KIT_TEXTOS_DIR`) se lee primero y, si no está definida, se usa la `IGA_<X>` del mismo
@@ -137,6 +176,7 @@ El registro del volumen pasa de `.iga-pack.json` a `.agent-pack.json` y las skil
 python -m pytest kit-runtime/provision/tests                 # aplicador, formato, firma y escritura de config (cryptography + PyYAML)
 cd kit-runtime/plugins/nucleo-acceso && python -m pytest
 cd kit-runtime/plugins/solo-lectura && python -m pytest
+cd kit-runtime/plugins/comandos-al-agente && python -m pytest
 # nucleo-identidad verifica la firma con el núcleo real: con el entorno de mcp-kit
 cd kit-runtime/plugins/nucleo-identidad && PYTHONPATH=<mcp-kit>/src <mcp-kit>/.venv/bin/python -m pytest
 ```
@@ -149,6 +189,26 @@ El workflow corre todos menos el de `nucleo-identidad` (necesita mcp-kit, que es
 2. Commit, y tag `v<VERSION>` (por ejemplo `v0.22.2-1`). El workflow verifica que coincidan, que haya una clave pública y ninguna privada, corre los
    tests, escribe el install stamp con la versión de Hermes y publica `ghcr.io/<owner>/hermes-runtime:<VERSION>` (solo `linux/amd64`). Un tag ya
    publicado no se pisa.
+
+## Los workflows oficiales de Hermes en este repo
+
+El repo trae los 54 workflows de `.github/workflows/` de Hermes, que corren en cada push y tag (Docker Hub, docs, desktop, tests contra
+proveedores…): en un repo privado gastan minutos y fallan por falta de sus secretos. **No se borran** (serían cambios a archivos oficiales en cada
+rebase): se desactivan desde la configuración del repo, que no viaja en los archivos.
+
+- **Uno por uno, sin código:** pestaña *Actions* → elegir el workflow → menú `…` → *Disable workflow*.
+- **Todos menos el nuestro, con `gh`** (el estado queda guardado en GitHub, no en el repo):
+
+  ```bash
+  gh workflow list --all --json path,state --jq '.[] | select(.state == "active") | .path' \
+    | grep -v 'hermes-runtime-publish.yml' \
+    | while read -r wf; do gh workflow disable "$(basename "$wf")"; done
+  ```
+
+- **No usar** *Settings → Actions → General → Disable actions*: apaga también `hermes-runtime-publish.yml`.
+
+Un workflow que llegue nuevo con un rebase de Hermes arranca **activo**: después de cada actualización de Hermes, volver a correr el comando de
+arriba y revisar `gh workflow list --all`.
 
 ## Actualizar Hermes
 

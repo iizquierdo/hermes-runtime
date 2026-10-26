@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import provision as p
-from conftest import CONFIG_DEL_PAQUETE, PLUGINS_HABILITADOS, escribir
+from conftest import CONFIG_DEL_PAQUETE, PLUGINS_HABILITADOS, VARS_DEL_PAQUETE, escribir
 
 
 def _config(memoria: bool = False, perfil: bool = False, gating: bool = True, del_paquete: bool = True,
@@ -404,7 +404,7 @@ def test_check_falla_si_el_gateway_no_admite_a_los_usuarios_nuevos(origen, home,
 @pytest.mark.parametrize("valor", ["true", "1", "True"])
 def test_check_pasa_si_el_gateway_admite_a_los_usuarios_nuevos(origen, home, monkeypatch, valor):
     p.comando_apply(origen, home, recargar=False)
-    monkeypatch.setattr(p, "entorno_del_gateway", lambda: {"TELEGRAM_ALLOW_ALL_USERS": valor})
+    monkeypatch.setattr(p, "entorno_del_gateway", lambda: {**VARS_DEL_PAQUETE, "TELEGRAM_ALLOW_ALL_USERS": valor})
 
     assert p.comando_check(origen, home) == 0
 
@@ -433,7 +433,7 @@ def test_la_clave_del_yaml_no_se_usa_para_abrir_el_gateway():
 @pytest.mark.parametrize("donde", ["entorno", "env"])
 def test_check_falla_si_hay_una_lista_cerrada_que_anula_el_allow_all(origen, home, monkeypatch, capsys, donde):
     p.comando_apply(origen, home, recargar=False)
-    entorno = {"TELEGRAM_ALLOW_ALL_USERS": "true"}
+    entorno = {**VARS_DEL_PAQUETE, "TELEGRAM_ALLOW_ALL_USERS": "true"}
     if donde == "entorno":
         entorno["TELEGRAM_ALLOWED_USERS"] = "true"
     else:
@@ -449,7 +449,7 @@ def test_check_falla_si_hay_una_lista_cerrada_que_anula_el_allow_all(origen, hom
 def test_una_lista_vacia_en_el_env_no_molesta(origen, home, monkeypatch):
     p.comando_apply(origen, home, recargar=False)
     escribir(home / ".env", "TELEGRAM_ALLOWED_USERS=\n")
-    monkeypatch.setattr(p, "entorno_del_gateway", lambda: {"TELEGRAM_ALLOW_ALL_USERS": "true"})
+    monkeypatch.setattr(p, "entorno_del_gateway", lambda: {**VARS_DEL_PAQUETE, "TELEGRAM_ALLOW_ALL_USERS": "true"})
 
     assert p.comando_check(origen, home) == 0
 
@@ -531,7 +531,8 @@ def test_la_version_del_runtime_sale_de_overlay_version(monkeypatch, tmp_path):
 def test_el_overlay_real_tiene_version_y_plugins():
     raiz = Path(__file__).resolve().parents[2]
     assert p.paquete.version_runtime((raiz / "VERSION").read_text().strip())
-    assert {"nucleo-acceso", "nucleo-identidad", "solo-lectura", "hermes-session-reset-policy"} <= set(p.plugins_de(raiz / "plugins"))
+    assert {"nucleo-acceso", "nucleo-identidad", "solo-lectura", "hermes-session-reset-policy",
+            "comandos-al-agente"} <= set(p.plugins_de(raiz / "plugins"))
 
 
 # --- valores por defecto del runtime: toolsets, seguridad, sesiones y panel web
@@ -579,7 +580,7 @@ def test_check_falla_si_la_seguridad_no_esta_fijada(origen, home, capsys):
 @pytest.mark.parametrize("valor, falla", [("true", True), ("1", True), ("0", False), ("", False)])
 def test_check_falla_si_el_panel_web_esta_encendido(origen, home, monkeypatch, capsys, valor, falla):
     _perfil_bot_listo(origen, home)
-    monkeypatch.setattr(p, "entorno_del_gateway", lambda: {"TELEGRAM_ALLOW_ALL_USERS": "true", "HERMES_DASHBOARD": valor})
+    monkeypatch.setattr(p, "entorno_del_gateway", lambda: {**VARS_DEL_PAQUETE, "TELEGRAM_ALLOW_ALL_USERS": "true", "HERMES_DASHBOARD": valor})
 
     assert p.comando_check(origen, home) == (1 if falla else 0)
     assert ("HERMES_DASHBOARD está encendida" in capsys.readouterr().out) is falla

@@ -1,0 +1,25 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Reporta el estado del runtime al núcleo (POST /runtime/status) cada KIT_REPORTE_SEGUNDOS (300 por defecto): versión del runtime,
+# del paquete y los chequeos de `provision.py check`. El primer reporte lo hace el gancho de arranque al aplicar el paquete.
+#
+# Sin KIT_CORE_URL y KIT_CORE_TOKEN (o las IGA_* de antes) no hay a quién reportar: sale enseguida y `finish` le dice a s6 que no
+# lo reinicie, como el servicio oficial `dashboard`. Un reporte que falla nunca corta nada: se reintenta en el próximo período.
+
+if [ -z "${KIT_CORE_URL:-${IGA_CORE_URL:-}}" ] || [ -z "${KIT_CORE_TOKEN:-${IGA_CORE_TOKEN:-}}" ]; then
+  exit 0
+fi
+
+intervalo="${KIT_REPORTE_SEGUNDOS:-300}"
+case "$intervalo" in
+  ''|*[!0-9]*) intervalo=300 ;;
+esac
+[ "$intervalo" -ge 60 ] || intervalo=60
+
+export HOME=/opt/data
+while :; do
+  sleep "$intervalo"
+  s6-setuidgid hermes env HOME=/opt/data HERMES_HOME="${HERMES_HOME:-/opt/data}" \
+    /opt/hermes/.venv/bin/python /opt/hermes/kit-runtime/provision/provision.py report --home "${HERMES_HOME:-/opt/data}" \
+    || echo "[plano-de-control] el reporte terminó con error; se reintenta en ${intervalo} s"
+done
