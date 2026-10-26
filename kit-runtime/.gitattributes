@@ -1,0 +1,6 @@
+# El overlay corre en un contenedor Linux: todo en LF (los scripts de s6 no arrancan con CRLF).
+* text=auto eol=lf
+# Copia fijada de un plugin de terceros: se conserva byte a byte (sus huellas están en UPSTREAM.md).
+plugins/hermes-session-reset-policy/__init__.py -text
+plugins/hermes-session-reset-policy/plugin.yaml -text
+plugins/hermes-session-reset-policy/LICENSE -text

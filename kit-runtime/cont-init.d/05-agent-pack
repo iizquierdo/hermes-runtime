@@ -1,0 +1,24 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Gancho de arranque del runtime (ver RUNTIME.md). s6 lo corre como root, después del setup oficial (01, 015 y 02) y antes de
+# los servicios.
+#
+# Corre el aplicador de la imagen como el usuario `hermes`: así lo que escribe en el volumen (plugins/, SOUL.md, skills, textos,
+# config.yaml) le pertenece. El chown oficial de stage2 no cubre esas rutas.
+#
+# NUNCA corta el arranque: ante cualquier problema lo deja en el log con el prefijo [agent-pack] y el contenedor sigue con lo que
+# tenía. Un paquete malo no debe dejar el bot caído.
+
+log() { echo "[agent-pack] $*"; }
+
+SCRIPT=/opt/hermes/kit-runtime/provision/apply-pack.sh
+
+if [ ! -f "$SCRIPT" ]; then
+  log "no encuentro $SCRIPT: se sigue sin aplicar el paquete"
+  exit 0
+fi
+
+if ! s6-setuidgid hermes env HOME=/opt/data HERMES_HOME="${HERMES_HOME:-/opt/data}" sh "$SCRIPT"; then
+  log "el paquete NO se aplicó (ver el detalle arriba): se sigue con la configuración actual"
+fi
+exit 0

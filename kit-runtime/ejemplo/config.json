@@ -1,0 +1,10 @@
+{
+  "mcp_servers": {
+    "nucleo": {
+      "url": "${KIT_MCP_URL}",
+      "headers": {"Authorization": "Bearer ${MCP_KIT_TOKEN}"}
+    }
+  },
+  "platform_toolsets": {"telegram": ["skills", "clarify"]},
+  "session_reset": {"mode": "idle", "idle_minutes": 120}
+}

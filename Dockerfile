@@ -541,3 +541,17 @@ VOLUME [ "/opt/data" ]
 # intercepted by /init's POSIX shell.
 ENTRYPOINT [ "/opt/hermes/docker/entrypoint-dispatch.sh" ]
 CMD [ ]
+
+# ---- hermes-runtime overlay: ÚNICO cambio a este Dockerfile (ver RUNTIME.md) ------------------------------------------------
+# Runtime genérico: nada de ningún cliente. El paquete del cliente (firmado) lo agrega su propia imagen en /opt/hermes/pack/ o llega
+# por AGENT_PACK_URL, y lo aplica al arrancar el gancho 05, como el usuario `hermes`, después del setup oficial (01, 015, 02).
+# kit-runtime/ ya está en /opt/hermes por el `COPY . .` de arriba; se copia de nuevo para no depender del .dockerignore oficial.
+COPY --chmod=a+rX,go-w kit-runtime/ /opt/hermes/kit-runtime/
+COPY --chmod=0755 kit-runtime/cont-init.d/05-agent-pack /etc/cont-init.d/05-agent-pack
+# Sin una clave pública no se podría aplicar ningún paquete: mejor que el build falle a publicar una imagen que no sirve.
+RUN set -eu; for clave in /opt/hermes/kit-runtime/keys/*.pub; do test -f "$clave"; done; \
+    /opt/hermes/.venv/bin/python -c "import cryptography.hazmat.primitives.asymmetric.ed25519"; \
+    /opt/hermes/.venv/bin/python /opt/hermes/kit-runtime/provision/provision.py --help >/dev/null
+# El gateway es el comando principal del contenedor (el servicio s6 `main-hermes` no hace nada); main-wrapper.sh lo corre como `hermes`.
+CMD [ "hermes", "gateway", "run" ]
+# ---- fin del overlay ---------------------------------------------------------------------------------------------------------------

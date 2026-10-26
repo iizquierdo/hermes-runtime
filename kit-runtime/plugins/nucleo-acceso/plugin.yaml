@@ -1,0 +1,5 @@
+name: nucleo-acceso
+version: 0.2.0
+description: Filtro de acceso sin LLM. Consulta el estado del chat en el directorio de usuarios del núcleo y corta el turno con un texto fijo si la persona no está activa (falla cerrado).
+provides_hooks:
+  - post_gateway_admission

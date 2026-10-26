@@ -1,0 +1,112 @@
+# Publica la imagen genérica del runtime en GHCR: ghcr.io/<owner>/hermes-runtime:<versión de Hermes>-<revisión>.
+#
+# Es el único workflow propio de este repo (ver RUNTIME.md); los demás son los oficiales de Hermes. Corre en cada tag
+# v<hermes>-<revisión> (por ejemplo v0.22.2-1), que tiene que coincidir con kit-runtime/VERSION. Un tag publicado no se pisa: para
+# corregir algo se sube la revisión.
+name: Publicar hermes-runtime
+
+on:
+  push:
+    tags: ["v*.*.*-*"]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: hermes-runtime-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publicar:
+    name: Construir y publicar la imagen
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Resolver la versión y verificar el overlay
+        id: version
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          declarada="$(tr -d '[:space:]' < kit-runtime/VERSION)"
+          if [ "$version" != "$declarada" ]; then
+            echo "::error::El tag $GITHUB_REF_NAME no coincide con kit-runtime/VERSION ($declarada)"
+            exit 1
+          fi
+          case "$version" in
+            *[!0-9.-]*|*-*-*) echo "::error::La versión $version no tiene la forma X.Y.Z-R"; exit 1 ;;
+          esac
+          if ! ls kit-runtime/keys/*.pub >/dev/null 2>&1; then
+            echo "::error::kit-runtime/keys no tiene ninguna clave pública: la imagen rechazaría todo paquete"
+            exit 1
+          fi
+          if grep -rlIE -e "-----BEGIN [A-Z ]*PRIVATE KEY-----" kit-runtime; then
+            echo "::error::Hay una clave privada en kit-runtime/"
+            exit 1
+          fi
+          owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          {
+            echo "version=$version"
+            echo "hermes=${version%-*}"
+            echo "imagen=ghcr.io/$owner/hermes-runtime"
+          } >> "$GITHUB_OUTPUT"
+
+      # Los tests de nucleo-identidad necesitan el núcleo (mcp-kit, repo privado aparte): se corren en local antes del tag
+      # (ver RUNTIME.md). Acá van los del aplicador del paquete y los de los otros plugins.
+      - name: Tests del overlay
+        run: |
+          set -eu
+          python -m pip install --quiet "pytest==8.4.2" "cryptography==50.0.1" "PyYAML==6.0.3"
+          python -m pytest -q -p no:cacheprovider kit-runtime/provision/tests
+          (cd kit-runtime/plugins/nucleo-acceso && python -m pytest -q -p no:cacheprovider)
+          (cd kit-runtime/plugins/solo-lectura && python -m pytest -q -p no:cacheprovider)
+
+      - name: Verificar que el tag no esté publicado
+        env:
+          IMAGEN: ${{ steps.version.outputs.imagen }}:${{ steps.version.outputs.version }}
+        run: |
+          if docker manifest inspect "$IMAGEN" >/dev/null 2>&1; then
+            echo "::error::$IMAGEN ya existe; subir la revisión en kit-runtime/VERSION y crear otro tag"
+            exit 1
+          fi
+
+      # La versión de Hermes que muestra la imagen (`hermes --version`) sale del install stamp, como en el workflow oficial.
+      - name: Escribir el install stamp
+        env:
+          HERMES_VERSION: ${{ steps.version.outputs.hermes }}
+        run: |
+          python3 scripts/write_install_stamp.py --output install-stamp.json \
+            --distribution docker --update-mechanism external --source ci --commit "$GITHUB_SHA" \
+            --base-version "$HERMES_VERSION" --display-version "$HERMES_VERSION" --distance 0
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Construir y publicar
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.version.outputs.imagen }}:${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.title=hermes-runtime
+            org.opencontainers.image.description=Hermes Agent con el overlay genérico de paquetes firmados
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha,scope=hermes-runtime
+          cache-to: type=gha,mode=max,scope=hermes-runtime

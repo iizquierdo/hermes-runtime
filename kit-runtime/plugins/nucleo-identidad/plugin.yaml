@@ -1,0 +1,6 @@
+name: nucleo-identidad
+version: 0.2.0
+description: Agrega la identidad firmada del chat (`<canal>:<id>`) a cada llamada al servidor MCP del núcleo (el modelo no participa).
+provides_hooks:
+  - pre_gateway_dispatch
+  - pre_tool_call

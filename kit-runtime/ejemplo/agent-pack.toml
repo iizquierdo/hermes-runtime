@@ -1,0 +1,18 @@
+# Declaración de un paquete de agente: qué datos del cliente entran en el zip. Las rutas son relativas a este archivo.
+# Se arma y se firma con:
+#   python kit-runtime/provision/provision.py bundle --decl <esta carpeta>/agent-pack.toml --version 0.1.0 \
+#       --out agent-pack.zip --clave-privada <fuera del repo>/agent-pack.pem
+
+nombre = "ejemplo"                        # minúsculas y guiones; las skills se instalan en skills/<nombre>/
+runtime = [">=0.22.2-1", "<0.23"]         # versiones de la imagen (hermes-runtime:<hermes>-<revisión>) con las que es compatible
+
+[contenido]
+soul = "SOUL.md"                          # identidad del bot (obligatoria)
+# soul_admin = "SOUL.admin.md"            # identidad del perfil de administración (opcional)
+skills = ["skills"]                       # carpetas que contienen <skill>/SKILL.md
+plugins = []                              # carpetas que contienen <plugin>/plugin.yaml (plugins propios del cliente)
+textos = "textos"                         # <plugin>.json con los textos de los plugins del runtime (opcional)
+config = "config.json"                    # configuración de Hermes que se aplica con load_config()/save_config() (opcional; .json o .yaml)
+
+[retirar]
+plugins = []                              # plugins de despliegues anteriores que hay que quitar del volumen

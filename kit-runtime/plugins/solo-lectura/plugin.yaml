@@ -1,0 +1,5 @@
+name: solo-lectura
+version: 0.1.0
+description: Solo lectura para canales de mensajería. Quien escribe por Telegram (o cualquier otro canal) puede usar tools, plugins y MCP, pero no modificar la configuración del agente, el sistema, las skills, la memoria, el cron ni los servidores MCP. El administrador es quien escribe por la TUI/CLI/escritorio.
+provides_hooks:
+  - pre_tool_call
